@@ -59,6 +59,7 @@ from sklearn.model_selection import BaseCrossValidator
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import validate_data
 from sklearn.metrics.pairwise import pairwise_distances
+from sklearn.utils.multiclass import type_of_target
 
 
 class KNearestNeighbors(ClassifierMixin, BaseEstimator):
@@ -82,6 +83,17 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         self : instance of KNearestNeighbors
             The current instance of the classifier
         """
+        X, y = validate_data(self, X, y)
+        target_type = type_of_target(y)
+        if target_type == "continuous":
+            raise ValueError(
+                "Unknown label type: continuous"
+            )
+
+        self._X = X
+        self._y = y
+        self.classes_ = np.unique(self._y)
+
         return self
 
     def predict(self, X):
@@ -97,7 +109,21 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         y : ndarray, shape (n_test_samples,)
             Predicted class labels for each test data sample.
         """
-        y_pred = np.zeros(X.shape[0])
+        check_is_fitted(self)
+        X = validate_data(self, X, reset=False)
+
+        y_pred = np.empty(X.shape[0], dtype=self._y.dtype)
+
+        distances = pairwise_distances(X, self._X)
+        for i in range(X.shape[0]):
+            distance_i = list(distances[i, :])
+            if i == 0:
+                print(distance_i)
+
+            idx = np.argsort(distances[i])[:self.n_neighbors]
+            values, counts = np.unique(self._y[idx], return_counts=True)
+            y_pred[i] = values[counts.argmax()]
+
         return y_pred
 
     def score(self, X, y):
@@ -115,7 +141,9 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         score : float
             Accuracy of the model computed for the (X, y) pairs.
         """
-        return 0.
+        y_pred = self.predict(X)
+        corrects = np.array(y == y_pred).astype(int).sum()
+        return corrects/len(y)
 
 
 class MonthlySplit(BaseCrossValidator):
@@ -137,6 +165,32 @@ class MonthlySplit(BaseCrossValidator):
     def __init__(self, time_col='index'):  # noqa: D107
         self.time_col = time_col
 
+    def get_dates(self, X):
+        """Return a Period with the dates in month.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where `n_samples` is the number of samples
+            and `n_features` is the number of features.
+
+        Returns
+        -------
+        dates : Period
+            The dates in X in months.
+        """
+        if self.time_col == "index":
+            dates = X.index
+        else:
+            if self.time_col not in X:
+                raise ValueError("datetime")
+            dates = X[self.time_col]
+
+        if not np.issubdtype(dates.dtype, np.datetime64):
+            raise ValueError("datetime")
+
+        return pd.Series(dates).dt.to_period("M")
+
     def get_n_splits(self, X, y=None, groups=None):
         """Return the number of splitting iterations in the cross-validator.
 
@@ -155,7 +209,8 @@ class MonthlySplit(BaseCrossValidator):
         n_splits : int
             The number of splits.
         """
-        return 0
+        dates = self.get_dates(X)
+        return len(dates.unique()) - 1
 
     def split(self, X, y, groups=None):
         """Generate indices to split data into training and test set.
@@ -177,12 +232,17 @@ class MonthlySplit(BaseCrossValidator):
         idx_test : ndarray
             The testing set indices for that split.
         """
-
-        n_samples = X.shape[0]
         n_splits = self.get_n_splits(X, y, groups)
+        dates = self.get_dates(X)
+        y_m = dates.sort_values().unique()
+
         for i in range(n_splits):
-            idx_train = range(n_samples)
-            idx_test = range(n_samples)
-            yield (
-                idx_train, idx_test
-            )
+            ym_train, ym_test = y_m[i], y_m[i+1]
+            mask_train = dates == ym_train
+            mask_test = dates == ym_test
+
+            idx_train = np.flatnonzero(mask_train)
+            idx_test = np.flatnonzero(mask_test)
+
+            if idx_train.size > 0 and idx_test.size > 0:
+                yield idx_train, idx_test
